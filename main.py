@@ -3,55 +3,63 @@ from fastapi.responses import StreamingResponse, JSONResponse
 import httpx
 import os
 import json
+from typing import AsyncGenerator
 
 app = FastAPI()
 
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
-DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
+# NVIDIA NIM API configuration
+NIM_API_KEY = os.getenv("NIM_API_KEY", "")
+NIM_BASE_URL = os.getenv("NIM_BASE_URL", "https://integrate.api.nvidia.com/v1")
 
 @app.get("/")
 async def root():
-    return {"status": "DeepSeek Proxy is running!", "models": ["deepseek-chat", "deepseek-reasoner"]}
+    return {"status": "OpenAI to NVIDIA NIM Proxy is running"}
 
 @app.get("/v1/models")
 async def list_models():
-    return {
-        "object": "list",
-        "data": [
-            {"id": "deepseek-chat", "object": "model", "owned_by": "deepseek"},
-            {"id": "deepseek-reasoner", "object": "model", "owned_by": "deepseek"}
-        ]
-    }
+    """List available models"""
+    async with httpx.AsyncClient() as client:
+        try:
+            headers = {
+                "Authorization": f"Bearer {NIM_API_KEY}",
+                "Content-Type": "application/json"
+            }
+            response = await client.get(f"{NIM_BASE_URL}/models", headers=headers)
+            return response.json()
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request):
+    """Proxy chat completions to NVIDIA NIM"""
     try:
         body = await request.json()
         
-        deepseek_body = {
-            "model": body.get("model", "deepseek-chat"),
+        # Transform OpenAI format to NIM format if needed
+        nim_body = {
+            "model": body.get("model", "meta/llama-3.1-8b-instruct"),
             "messages": body.get("messages", []),
             "temperature": body.get("temperature", 0.7),
             "top_p": body.get("top_p", 1.0),
-            "max_tokens": body.get("max_tokens", 2048),
+            "max_tokens": body.get("max_tokens", 1024),
             "stream": body.get("stream", False)
         }
         
         headers = {
-            "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+            "Authorization": f"Bearer {NIM_API_KEY}",
             "Content-Type": "application/json"
         }
         
         async with httpx.AsyncClient(timeout=120.0) as client:
-            if deepseek_body["stream"]:
+            if nim_body["stream"]:
                 return StreamingResponse(
-                    stream_response(client, deepseek_body, headers),
+                    stream_nim_response(client, nim_body, headers),
                     media_type="text/event-stream"
                 )
             else:
                 response = await client.post(
-                    f"{DEEPSEEK_BASE_URL}/chat/completions",
-                    json=deepseek_body,
+                    f"{NIM_BASE_URL}/chat/completions",
+                    json=nim_body,
                     headers=headers
                 )
                 return JSONResponse(content=response.json())
@@ -59,16 +67,21 @@ async def chat_completions(request: Request):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-async def stream_response(client, body, headers):
+async def stream_nim_response(
+    client: httpx.AsyncClient, 
+    body: dict, 
+    headers: dict
+) -> AsyncGenerator[str, None]:
+    """Stream responses from NVIDIA NIM"""
     async with client.stream(
         "POST",
-        f"{DEEPSEEK_BASE_URL}/chat/completions",
+        f"{NIM_BASE_URL}/chat/completions",
         json=body,
         headers=headers
     ) as response:
         async for chunk in response.aiter_bytes():
             if chunk:
-                yield chunk
+                yield chunk.decode("utf-8")
 
 if __name__ == "__main__":
     import uvicorn
